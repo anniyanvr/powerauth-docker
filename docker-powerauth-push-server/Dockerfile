@@ -1,16 +1,15 @@
-FROM tomcat:10.1.15-jdk17-temurin-jammy@sha256:b59a28630efc10589c45994471264f9c0e29ee381d4f0d50a8eac1d68a076746
+FROM tomcat:10.1.50-jre21-temurin-noble@sha256:be6ccee5e899a399f2c6dbf05090b0adbefd14275ffa7aa187533ce22e5564ce
 LABEL maintainer="petr@wultra.com"
 
 # Prepare environment variables
-ENV JAVA_HOME /opt/java/openjdk
-ENV TOMCAT_HOME /usr/local/tomcat
+ENV JAVA_HOME=/opt/java/openjdk
+ENV TOMCAT_HOME=/usr/local/tomcat
 
 # Clear root context
 RUN rm -rf $TOMCAT_HOME/webapps/*
 
 # Copy libraries
 ADD deploy/lib/ojdbc11.jar $TOMCAT_HOME/lib/
-ADD deploy/lib/postgresql.jar $TOMCAT_HOME/lib/
 
 # Deploy and run applications
 ADD deploy/conf/powerauth-push-server.xml $TOMCAT_HOME/conf/Catalina/localhost/

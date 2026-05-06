@@ -1,0 +1,154 @@
+name: Build and deploy docker image
+
+on:
+  workflow_dispatch:
+    branches:
+      - 'develop'
+      - 'master'
+      - 'releases/*'
+    inputs:
+      version:
+        description: Application release version e.g. 1.0.0
+        type: string
+        required: true
+      products_to_push:
+        description: Array of product names for which build will be done.
+        type: string
+        default: '["server","enrollment-server","data-adapter","nextstep","push-server","webflow","tpp-engine"]'
+        required: true
+      push_to_acr:
+        description: Push to Azure registry?
+        type: boolean
+        default: false
+      push_to_docker_hub:
+        description: Push to Docker HUB registry?
+        type: boolean
+        default: false
+
+
+jobs:
+  build-app:
+    name: app image
+    strategy:
+      matrix:
+        app: ${{ fromJSON(github.event.inputs.products_to_push)}}
+    runs-on: 'ubuntu-latest'
+    environment: docker-publish
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare Libs
+        run: |
+          wget --no-verbose https://repo1.maven.org/maven2/com/oracle/database/jdbc/ojdbc11/23.8.0.25.04/ojdbc11-23.8.0.25.04.jar -O ${GITHUB_WORKSPACE}/deploy/lib/ojdbc11.jar
+      - name: Get Powerauth Server WAR files
+        if: matrix.app == 'server'
+        run: |
+          wget --no-verbose https://github.com/wultra/powerauth-server/releases/download/${{ inputs.version }}/powerauth-admin.war -O ${GITHUB_WORKSPACE}/deploy/images/powerauth-admin.war
+          wget --no-verbose https://github.com/wultra/powerauth-server/releases/download/${{ inputs.version }}/powerauth-java-server.war -O ${GITHUB_WORKSPACE}/deploy/images/powerauth-java-server.war
+      - name: Get Enrollment Server WAR files
+        if: matrix.app == 'enrollment-server'
+        run: |
+          wget --no-verbose https://github.com/wultra/enrollment-server/releases/download/${{ inputs.version }}/enrollment-server.war  -O ${GITHUB_WORKSPACE}/deploy/images/enrollment-server.war
+      - name: Get Powerauth Push Server WAR files
+        if: matrix.app == 'push-server'
+        run: |
+          wget --no-verbose https://github.com/wultra/powerauth-push-server/releases/download/${{ inputs.version }}/powerauth-push-server.war -O ${GITHUB_WORKSPACE}/deploy/images/powerauth-push-server.war
+      - name: Get Powerauth Data Adapter WAR files
+        if: matrix.app == 'data-adapter'
+        run: |
+          wget --no-verbose https://github.com/wultra/powerauth-webflow-customization/releases/download/${{ inputs.version }}/powerauth-data-adapter.war -O ${GITHUB_WORKSPACE}/deploy/images/powerauth-data-adapter.war
+      - name: Get Powerauth ${{ matrix.app }} WAR file
+        if: contains(fromJson('["nextstep","webflow","tpp-engine"]'), matrix.app)
+        run: |
+          wget --no-verbose https://github.com/wultra/powerauth-webflow/releases/download/${{ inputs.version }}/powerauth-${{ matrix.app }}.war -O ${GITHUB_WORKSPACE}/deploy/images/powerauth-${{ matrix.app }}.war
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Log in to Azure registry
+        if: inputs.push_to_acr == true
+        uses: docker/login-action@v3
+        with:
+          registry: https://powerauth.azurecr.io/
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+      - name: Log in to Docker hub registry
+        if: inputs.push_to_docker_hub == true
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_PASSWORD }}
+      - name: "powerauth-${{ matrix.app }} ${{ inputs.version }}: Build and push docker image (if enabled)"
+        uses: docker/build-push-action@v5
+        with:
+          push: ${{ inputs.push_to_acr == true || inputs.push_to_docker_hub == true }}
+          context: .
+          platforms: linux/amd64,linux/arm64
+          file: ./docker-powerauth-${{matrix.app}}/Dockerfile
+          tags: |
+            ${{ inputs.push_to_acr == true && format('powerauth.azurecr.io/{0}:{1}', matrix.app, inputs.version) || '' }}
+            ${{ inputs.push_to_docker_hub == true && format('powerauth/{0}:{1}', matrix.app, inputs.version) || '' }}
+            ${{ inputs.push_to_docker_hub == true && format('powerauth/{0}:latest', matrix.app) || '' }}
+
+  prepare-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.filter.outputs.matrix }}
+    steps:
+      - id: filter
+        shell: bash
+        run: |
+          ALL_APPS='["server","enrollment","push","webflow"]'
+          SELECTED='${{ inputs.products_to_push }}'
+
+          MATRIX=$(jq -nc \
+            --argjson all "$ALL_APPS" \
+            --argjson selected "$SELECTED" \
+            '
+              {
+                app: [
+                  $all[]
+                  | select(. as $app | $selected | index($app))
+                ]
+              }
+            ')
+
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "$MATRIX"
+
+  build-psql:
+    needs: prepare-matrix
+    name: postgresql image
+    strategy:
+      matrix: ${{ fromJSON(needs.prepare-matrix.outputs.matrix) }}
+    runs-on: 'ubuntu-latest'
+    environment: docker-publish
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Log in to Azure registry
+        if: inputs.push_to_acr == true
+        uses: docker/login-action@v3
+        with:
+          registry: https://powerauth.azurecr.io/
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+      - name: Log in to Docker hub registry
+        if: inputs.push_to_docker_hub == true
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_PASSWORD }}
+      - name: "powerauth-${{ matrix.app }}-postgresql ${{ inputs.version }}: Build and push docker image (if enabled)"
+        uses: docker/build-push-action@v5
+        with:
+          push: ${{ inputs.push_to_acr == true || inputs.push_to_docker_hub == true }}
+          context: .
+          platforms: linux/amd64,linux/arm64
+          file: ./docker-powerauth-${{matrix.app}}-postgresql/Dockerfile
+          tags: |
+            ${{ inputs.push_to_acr == true && format('powerauth.azurecr.io/{0}-postgresql:{1}', matrix.app, inputs.version) || '' }}
+            ${{ inputs.push_to_docker_hub == true && format('powerauth/{0}-postgresql:{1}', matrix.app, inputs.version) || '' }}
+            ${{ inputs.push_to_docker_hub == true && format('powerauth/{0}-postgresql:latest', matrix.app) || '' }}
